@@ -7,6 +7,8 @@ function! s:InitVariable(var, value)
     return 0
 endfunction
 
+silent! let s:log = logger#getLogger(expand('<sfile>:t'))
+
 function! s:DictFetch(dict, key, default)
     if has_key(a:dict, a:key)
         return a:dict[a:key]
@@ -21,9 +23,11 @@ function! s:CreateRunnerPane(...)
         let s:vtr_percentage = s:DictFetch(a:1, 'percentage', s:vtr_percentage)
         let g:VtrInitialCommand = s:DictFetch(a:1, 'cmd', g:VtrInitialCommand)
     endif
+    let s:vim_window = s:ActiveWindowIndex()
     let s:vim_pane = s:ActivePaneIndex()
     let cmd = join(["split-window -p", s:vtr_percentage, "-".s:vtr_orientation])
     call s:SendTmuxCommand(cmd)
+    let s:runner_window = s:ActiveWindowIndex()
     let s:runner_pane = s:ActivePaneIndex()
     call s:FocusVimPane()
     if g:VtrGitCdUpOnOpen
@@ -42,6 +46,13 @@ function! s:DetachRunnerPane()
 endfunction
 
 function! s:ValidRunnerPaneSet()
+    let marked_pane = s:SendTmuxCommand("display-message -p -t '~'")
+    if marked_pane !=# 'no marked target'
+        let s:runner_window = s:MarkedWindowIndex()
+        let s:runner_pane = s:MarkedPaneIndex()
+        return 1
+    endif
+
     if !exists("s:runner_pane")
         call s:EchoError("No runner pane attached.")
         return 0
@@ -120,8 +131,20 @@ function! s:KillRunnerPane()
     endif
 endfunction
 
+function! s:ActiveWindowIndex()
+    return str2nr(s:SendTmuxCommand("display-message -p '#{window_index}'"))
+endfunction
+
 function! s:ActivePaneIndex()
-  return str2nr(s:SendTmuxCommand("display-message -p \"#{pane_index}\""))
+    return str2nr(s:SendTmuxCommand("display-message -p '#{pane_index}'"))
+endfunction
+
+function! s:MarkedWindowIndex()
+    return str2nr(s:SendTmuxCommand("display-message -t '~' -p '#{window_index}'"))
+endfunction
+
+function! s:MarkedPaneIndex()
+    return str2nr(s:SendTmuxCommand("display-message -t '~' -p '#{pane_index}'"))
 endfunction
 
 function! s:TmuxPanes()
@@ -159,6 +182,7 @@ endfunction
 
 function! s:SendTmuxCommand(command)
     let prefixed_command = "tmux " . a:command
+    silent! call s:log.info('Tmux: ', prefixed_command)
     return s:Strip(system(prefixed_command))
 endfunction
 
@@ -421,7 +445,8 @@ function! s:SendTextToRunner(lines)
     let prepared = s:PrepareLines(a:lines)
     let joined_lines = join(prepared, "\r") . "\r"
     let send_keys_cmd = s:TargetedTmuxCommand("send-keys", s:runner_pane)
-    let targeted_cmd = send_keys_cmd . ' ' . shellescape(joined_lines)
+    let s:user_command = shellescape(joined_lines)
+    let targeted_cmd = send_keys_cmd . ' ' . s:user_command
     call s:SendTmuxCommand(targeted_cmd)
 endfunction
 
