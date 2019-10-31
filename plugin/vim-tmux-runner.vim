@@ -8,7 +8,7 @@ function! s:InitVariable(var, value)
 endfunction
 
 silent! let s:log = logger#getLogger(expand('<sfile>:t'))
-let s:osprompt = 0
+let s:osprompt = ''
 
 function! s:DictFetch(dict, key, default)
     if has_key(a:dict, a:key)
@@ -183,8 +183,14 @@ endfunction
 
 function! s:SendTmuxCommand(command)
     let prefixed_command = "tmux " . a:command
-    silent! call s:log.info('Tmux: ', prefixed_command)
-    return s:Strip(system(prefixed_command))
+    let out_str = s:Strip(system(prefixed_command))
+
+    if a:command =~# 'send-keys .*'
+        silent! call s:log.info("TmuxKeys=[", a:command, "]")
+    else
+        silent! call s:log.info('TmuxCmd=[', a:command, ']')
+    endif
+    return out_str
 endfunction
 
 function! s:TargetedTmuxCommand(command, target_pane)
@@ -554,10 +560,10 @@ function s:SystemCmdWait(command, line_min, line_max, prompt)
     elseif len(a:prompt) > 0
         for i in [1,2,4,8,16]
             exec 'sleep '. i . '00m'
-            let strcmd = "tmux capture-pane -t '~' -p | awk 'BEGIN{RS=\"\";ORS=\"\\n\\n\"}1' | tee /tmp/vim.yank | grep -c '". a:prompt . "'"
+            let strcmd = "tmux capture-pane -t '~' -p | awk 'BEGIN{RS=\"\";ORS=\"\\n\\n\"}1' | tee /tmp/vim.yank | sed -n '2,$s/". a:prompt ."/&/p' | wc -l"
             let has_prompt = str2nr(s:Strip(system(strcmd)))
             silent! call s:log.info("prompt=", has_prompt, " cmd=", strcmd)
-            if has_prompt > 1
+            if has_prompt > 0
                 break
             endif
         endfor
@@ -570,8 +576,10 @@ function s:SystemCmdWait(command, line_min, line_max, prompt)
 endfunction
 
 function s:GuessOSPrompt()
-    if !s:osprompt
+    if len(s:osprompt) == 0
         call s:SendClearSequence()
+        call s:SendClearSequence()
+        1sleep
         let s:osprompt = s:SystemCmdWait('', 1, 1, '')
         silent! call s:log.info("osprompt=[", s:osprompt, "]")
         return 2
