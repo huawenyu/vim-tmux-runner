@@ -503,7 +503,6 @@ function! VtrSendCommand(command, ...) range
         let mark_1 = line("'u")
         let mark_2 = line("'n")
         if mark_1 > 0 && mark_2 > 0
-            echomsg "wilson marked mode"
             call s:SendTextToRunner(getline(mark_1, mark_2))
             return
         endif
@@ -511,13 +510,11 @@ function! VtrSendCommand(command, ...) range
           let [select_1, col1] = getpos("'<")[1:2]
           let [select_2, col2] = getpos("'>")[1:2]
           if select_1 > 0 && select_2 > 0
-              echomsg "wilson selected from ". select_1. " to ". select_2
               call s:SendTextToRunner(getline(select_1, select_2))
               return
           endif
       endif
 
-      echomsg "wilson command mode"
       call s:SendCommandToRunner(ensure_pane, a:command)
 endfunction
 
