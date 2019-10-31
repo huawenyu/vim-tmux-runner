@@ -8,6 +8,7 @@ function! s:InitVariable(var, value)
 endfunction
 
 silent! let s:log = logger#getLogger(expand('<sfile>:t'))
+let s:osprompt = 0
 
 function! s:DictFetch(dict, key, default)
     if has_key(a:dict, a:key)
@@ -495,27 +496,87 @@ endfunction
 function! VtrSendCommand(command, ...) range
     let ensure_pane = 0
     if exists("a:1")
-      let ensure_pane = a:1
+        let ensure_pane = a:1
     endif
 
-    if ensure_pane ==# 'n'
+    call s:SendCommandToRunner(ensure_pane, a:command)
+endfunction
+
+function! VtrSendCommandEx(mode)
+    if a:mode ==# 'n'
         " Try check mark first: xX as start-end region
         let mark_1 = line("'u")
         let mark_2 = line("'n")
+        let cur_line = line('.')
         if mark_1 > 0 && mark_2 > 0
             call s:SendTextToRunner(getline(mark_1, mark_2))
+        else
+            call s:SendTextToRunner(getline(cur_line, cur_line))
+        endif
+        return
+    elseif a:mode ==# 'v'
+        let [select_1, col1] = getpos("'<")[1:2]
+        let [select_2, col2] = getpos("'>")[1:2]
+        if select_1 > 0 && select_2 > 0
+            call s:SendTextToRunner(getline(select_1, select_2))
             return
         endif
-      elseif ensure_pane ==# 'v'
-          let [select_1, col1] = getpos("'<")[1:2]
-          let [select_2, col2] = getpos("'>")[1:2]
-          if select_1 > 0 && select_2 > 0
-              call s:SendTextToRunner(getline(select_1, select_2))
-              return
-          endif
-      endif
+    endif
+endfunction
 
-      call s:SendCommandToRunner(ensure_pane, a:command)
+" Same as VtrSendCommandEx, but capture the output
+function! VtrExecuteCommand(mode)
+    if s:GuessOSPrompt() < 2
+        call s:SendClearSequence()
+    endif
+    call VtrSendCommandEx(a:mode)
+
+    call s:SystemCmdWait('', 0, 0, s:osprompt)
+    "call s:SendTmuxCommand("save-buffer -b REPL /tmp/vim.yank")
+    exec "read /tmp/vim.yank"
+endfunction
+
+function s:SystemCmdWait(command, line_min, line_max, prompt)
+    if len(a:command) > 0
+        call system(a:command)
+    endif
+
+    if a:line_min > 0
+        for i in [1,2,4,8,16]
+            exec 'sleep '. i . '00m'
+            let out_cmd = "tmux capture-pane -t '~' -p | awk 'BEGIN{RS=\"\";ORS=\"\\n\\n\"}1' | tee /tmp/vim.yank | wc -l"
+            let out_cnt = str2nr(s:Strip(system(out_cmd)))
+            silent! call s:log.info("out_lines=", out_cnt, " cmd=", out_cmd)
+            if out_cnt >= a:line_min && out_cnt <= a:line_max
+                break
+            endif
+        endfor
+    elseif len(a:prompt) > 0
+        for i in [1,2,4,8,16]
+            exec 'sleep '. i . '00m'
+            let strcmd = "tmux capture-pane -t '~' -p | awk 'BEGIN{RS=\"\";ORS=\"\\n\\n\"}1' | tee /tmp/vim.yank | grep -c '". a:prompt . "'"
+            let has_prompt = str2nr(s:Strip(system(strcmd)))
+            silent! call s:log.info("prompt=", has_prompt, " cmd=", strcmd)
+            if has_prompt > 1
+                break
+            endif
+        endfor
+    endif
+
+    if a:line_min > 0
+        return s:Strip(join(readfile("/tmp/vim.yank"), "\n"))
+    endif
+    return ''
+endfunction
+
+function s:GuessOSPrompt()
+    if !s:osprompt
+        call s:SendClearSequence()
+        let s:osprompt = s:SystemCmdWait('', 1, 2, '')
+        silent! call s:log.info("osprompt=[", s:osprompt, "]")
+        return 2
+    endif
+    return 1
 endfunction
 
 function! s:DefineCommands()
