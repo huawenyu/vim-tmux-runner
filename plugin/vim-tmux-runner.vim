@@ -544,7 +544,7 @@ function s:SystemCmdWait(command, line_min, line_max, prompt)
     if a:line_min > 0
         for i in [1,2,4,8,16]
             exec 'sleep '. i . '00m'
-            let out_cmd = "tmux capture-pane -t '~' -p | awk 'BEGIN{RS=\"\";ORS=\"\\n\\n\"}1' | tee /tmp/vim.yank | wc -l"
+            let out_cmd = "tmux capture-pane -t '~' -p | sed '/^$/d' | tee /tmp/vim.yank | wc -l"
             let out_cnt = str2nr(s:Strip(system(out_cmd)))
             silent! call s:log.info("out_lines=", out_cnt, " cmd=", out_cmd)
             if out_cnt >= a:line_min && out_cnt <= a:line_max
@@ -572,7 +572,7 @@ endfunction
 function s:GuessOSPrompt()
     if !s:osprompt
         call s:SendClearSequence()
-        let s:osprompt = s:SystemCmdWait('', 1, 2, '')
+        let s:osprompt = s:SystemCmdWait('', 1, 1, '')
         silent! call s:log.info("osprompt=[", s:osprompt, "]")
         return 2
     endif
