@@ -423,7 +423,15 @@ function! s:SendLinesToRunner(ensure_pane) range
     if a:ensure_pane | call s:EnsureRunnerPane() | endif
     if !s:ValidRunnerPaneSet() | return | endif
     call s:SendTmuxCopyModeExit()
-    call s:SendTextToRunner(getline(a:firstline, a:lastline))
+
+    " Try check mark first: xX as start-end region
+    let line_s = line("'x")
+    let line_e = line("'X")
+    if line_s > 0 && line_e > 0
+        call s:SendTextToRunner(getline(line_s, line_e))
+    else
+        call s:SendTextToRunner(getline(a:firstline, a:lastline))
+    endif
 endfunction
 
 function! s:PrepareLines(lines)
@@ -484,12 +492,33 @@ function! s:CurrentFiletypeRunners()
     endif
 endfunction
 
-function! VtrSendCommand(command, ...)
+function! VtrSendCommand(command, ...) range
     let ensure_pane = 0
     if exists("a:1")
       let ensure_pane = a:1
     endif
-    call s:SendCommandToRunner(ensure_pane, a:command)
+
+    if ensure_pane ==# 'n'
+        " Try check mark first: xX as start-end region
+        let mark_1 = line("'u")
+        let mark_2 = line("'n")
+        if mark_1 > 0 && mark_2 > 0
+            echomsg "wilson marked mode"
+            call s:SendTextToRunner(getline(mark_1, mark_2))
+            return
+        endif
+      elseif ensure_pane ==# 'v'
+          let [select_1, col1] = getpos("'<")[1:2]
+          let [select_2, col2] = getpos("'>")[1:2]
+          if select_1 > 0 && select_2 > 0
+              echomsg "wilson selected from ". select_1. " to ". select_2
+              call s:SendTextToRunner(getline(select_1, select_2))
+              return
+          endif
+      endif
+
+      echomsg "wilson command mode"
+      call s:SendCommandToRunner(ensure_pane, a:command)
 endfunction
 
 function! s:DefineCommands()
