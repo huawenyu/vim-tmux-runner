@@ -21,9 +21,10 @@ if !exists("g:VtrDisplayPaneNum")  | let g:VtrDisplayPaneNum = 1           | end
 if !exists("g:VtrStripLeadSpace")  | let g:VtrStripLeadSpace = 1           | endif
 if !exists("g:VtrClearEmptyLines") | let g:VtrClearEmptyLines = 1          | endif
 if !exists("g:VtrAppendNewline")   | let g:VtrAppendNewline = 0            | endif
-if !exists("g:VtrWaitPrompt")      | let g:VtrWaitPrompt = [1,2,4,8,12,16] | endif
+if !exists("g:VtrWaitSec")         | let g:VtrWaitSec = 4                  | endif
 if !exists("g:VtrUseMarkStart")    | let g:VtrUseMarkStart = 'u'           | endif
 if !exists("g:VtrUseMarkEnd")      | let g:VtrUseMarkEnd = 'n'             | endif
+if !exists("g:VtrCmdOutput")       | let g:VtrCmdOutput = '/tmp/vim.yank'  | endif
 
 " VarInit {{{1
 let s:osprompt = ''
@@ -31,8 +32,18 @@ let s:runner_marker = 0
 let s:runner_window = -1
 let s:vtr_percentage = g:VtrPercentage
 let s:vtr_orientation = g:VtrOrientation
-let s:vtr_wait_result = 0  | " 0 not-waiting, 1 waiting, 2 wait-succ, 3 wait-timeout
-let s:vtr_wait_timer = 0
+let s:vtr_wait_period = 300  | "milliseconds.
+let s:vtr_wait_sec = g:VtrWaitSec * 1000
+let s:vtr_wait_count = s:vtr_wait_sec / s:vtr_wait_period
+
+" @result: 0 not-waiting,
+"          1 waiting, 2 wait-succ, 3 wait-timeout
+"         -1 request err
+"         -2 interrupt by user: active paste from tmux-buffer
+"
+" @stop_mode:   0 wait prompt, 1 wait lines
+" @output_mode: 0 ignore, 1 insert here
+let s:vtr_wait_result = {'async': 0, 'stop_mode': 0, 'output_mode': 0, 'min': 0, 'max': 0, 'timer': 0, 'timer_cnt': 0, 'result': 0, }
 
 " Functions {{{1
 function! s:DictFetch(dict, key, default)
@@ -562,6 +573,12 @@ function! VtrSendCommandEx(mode)
     endif
 endfunction
 
+function! s:ShellCmd(log, strcmd)
+    let strcmd = s:Strip(a:strcmd)
+    if a:log | silent! call s:log.info("ShellCmd=[", strcmd, "]") | endif
+    return system(strcmd)
+endfunction
+
 " Same as VtrSendCommandEx, but capture the output
 function! VtrExecuteCommand(mode)
     if s:GuessOSPrompt() < 2
@@ -569,83 +586,190 @@ function! VtrExecuteCommand(mode)
     endif
 
     call s:SendClearSequence()
-    call system("tmux clear-history -t '~'")
+    call s:ShellCmd(1, "tmux clear-history -t '~'")
 
     call VtrSendCommandEx(a:mode)
 
-    call s:SystemCmdWait('', 0, 0, s:osprompt)
-    "call s:SendTmuxCommand("save-buffer -b REPL /tmp/vim.yank")
-
-    if s:vtr_wait_result >= 2
-        exec "read /tmp/vim.yank"
-    endif
-    let s:vtr_wait_result = 0
+    call s:WaitCmdResultAsync(0, 0, 0, 1)
+    "call s:SendTmuxCommand("save-buffer -b REPL ". g:VtrCmdOutput)
 endfunction
 
-function s:SystemCmdWait(command, line_min, line_max, prompt)
-    if len(a:command) > 0
-        call system(a:command)
+function s:CaptureOutput(strcmd)
+    let line_cnt = str2nr(s:Strip(s:ShellCmd(0, a:strcmd)))
+    silent! call s:log.info("Lines[", line_cnt, "]: ", a:strcmd)
+    return line_cnt
+endfunc
+
+function s:TimerProcessResult(timer, result)
+    if a:timer | call timer_stop(a:timer) | endif
+
+    " take-action
+    if s:vtr_wait_result.async
+        let s:vtr_wait_result.result = 0
+        if s:vtr_wait_result.output_mode
+            exec "read ". g:VtrCmdOutput
+        endif
+    else
+        let s:vtr_wait_result.result = a:result
+    endif
+endfunc
+
+function! VtrTimerHandlerLine(timer)
+    if s:vtr_wait_result.result <= 0
+        if a:timer | call timer_stop(a:timer) | endif
+        return
     endif
 
-    let s:vtr_wait_result = 1
-    if a:line_min > 0
-        for i in g:VtrWaitPrompt
-            exec 'sleep '. i . '00m'
-            if !s:vtr_wait_result | break | endif
-            let out_cmd = "tmux capture-pane -S- -t '~' -p | sed '/^$/d' | tee /tmp/vim.yank | wc -l"
-            let out_cnt = str2nr(s:Strip(system(out_cmd)))
-            silent! call s:log.info("out_lines=", out_cnt, " cmd=", out_cmd)
-            if out_cnt >= a:line_min && out_cnt <= a:line_max
-                let s:vtr_wait_result = 2
-                break
-            endif
-        endfor
-    elseif len(a:prompt) > 0
-        for i in g:VtrWaitPrompt
-            exec 'sleep '. i . '00m'
-            if !s:vtr_wait_result | break | endif
-            let strcmd = "tmux capture-pane -S- -t '~' -p | awk 'BEGIN{RS=\"\";ORS=\"\\n\\n\"}1' | tee /tmp/vim.yank | sed -n '2,$s/". a:prompt ."/&/p' | wc -l"
-            let has_prompt = str2nr(s:Strip(system(strcmd)))
-            silent! call s:log.info("prompt=", has_prompt, " cmd=", strcmd)
-            if has_prompt > 0
-                let s:vtr_wait_result = 2
-                break
-            endif
-        endfor
+    let s:vtr_wait_result.timer_cnt += 1
+    let get_output = "tmux capture-pane -S- -t '~' -p | sed '/^$/d' | tee ". g:VtrCmdOutput." | wc -l"
+
+    if s:vtr_wait_result.timer_cnt >= s:vtr_wait_count
+        call s:CaptureOutput(get_output)
+        call s:TimerProcessResult(a:timer, 3)
+    elseif s:vtr_wait_result.result > 0
+        let out_cnt = s:CaptureOutput(get_output)
+        "call s:DumpWaitResult("handle line")
+        "silent! call s:log.info("out_cnt=", out_cnt)
+        if out_cnt >= s:vtr_wait_result.min && out_cnt <= s:vtr_wait_result.max
+            call s:TimerProcessResult(a:timer, 2)
+        endif
     endif
+endfunc
+
+function! VtrTimerHandlerPrompt(timer)
+    if s:vtr_wait_result.result <= 0
+        if a:timer | call timer_stop(a:timer) | endif
+        return
+    endif
+
+    let s:vtr_wait_result.timer_cnt += 1
+    let get_output = "tmux capture-pane -S- -t '~' -p | awk 'BEGIN{RS=\"\";ORS=\"\\n\\n\"}1' | tee ". g:VtrCmdOutput." | sed -n '2,$s/". s:osprompt ."/&/p' | wc -l"
+
+    if s:vtr_wait_result.timer_cnt >= s:vtr_wait_count
+        call s:CaptureOutput(get_output)
+        call s:TimerProcessResult(a:timer, 3)
+    elseif s:vtr_wait_result.result > 0
+        let has_prompt = s:CaptureOutput(get_output)
+        if has_prompt > 0
+            call s:TimerProcessResult(a:timer, 2)
+        endif
+    endif
+endfunc
+
+function s:DumpWaitResult(funcname)
+    silent! call s:log.info("Dump WaitRequest from ", a:funcname, ":", s:vtr_wait_result)
+endfunction
+
+" @return bool
+function s:WaitCmdInit(_func, async, stop_mode, line_min, line_max, output_mode)
+
+    call s:WaitStopTimer()
+    let s:vtr_wait_result.async = a:async
+    let s:vtr_wait_result.stop_mode = a:stop_mode
+    let s:vtr_wait_result.output_mode = a:output_mode
+    if a:stop_mode == 0   | " @stop_mode:   0 wait prompt, 1 wait lines
+        if len(s:osprompt) <= 1
+            let info = ''. a:_func. "prompt stop_mode but no osprompt, wait timer guess os-prompt!"
+            silent! call s:log.info(_func, )
+            echomsg "vim-tmux-runner: ". info
+            return 0
+        endif
+    elseif a:stop_mode == 1
+        if a:line_min <= 0 && a:line_max <= 0
+            let info = ''. a:_func. "line stop_mode but no (min,max) assign!"
+            silent! call s:log.info(_func, info)
+            echomsg "vim-tmux-runner: ". info
+            return 0
+        endif
+    else
+        silent! call s:log.info(_func, "unkown stop_mode!")
+        return 0
+    endif
+    let s:vtr_wait_result.min = a:line_min
+    let s:vtr_wait_result.max = a:line_max
+    call s:DumpWaitResult(a:_func)
+    return 1
+endfunction
+
+function s:WaitStopTimer()
+    if s:vtr_wait_result.timer
+        call timer_stop(s:vtr_wait_result.timer)
+        let s:vtr_wait_result.timer = 0
+    endif
+    let s:vtr_wait_result.timer_cnt = 0
+endfunction
+
+" @return when stop_mode=line: the cmd output
+"         '': empty line
+function s:WaitCmdResult(stop_mode, line_min, line_max, output_mode)
+    let _func = 'WaitCmdResult() '
+
+    let chk = s:WaitCmdInit(_func, 0, a:stop_mode, a:line_min, a:line_max, a:output_mode)
+    if !chk | let s:vtr_wait_result.result = -1 | return | endif
+    let s:vtr_wait_result.result = 1
+
+    let sec = 0
+    while sec < s:vtr_wait_sec
+        let sec += s:vtr_wait_period
+        exec 'sleep '. s:vtr_wait_period. 'm'
+
+        if s:vtr_wait_result.stop_mode == 1
+            call VtrTimerHandlerLine(0)
+        elseif s:vtr_wait_result.stop_mode == 0
+            call VtrTimerHandlerPrompt(0)
+        endif
+
+        if s:vtr_wait_result.result < 1 || s:vtr_wait_result.result == 2
+            break
+        endif
+    endwhile
 
     " Timeout
-    if s:vtr_wait_result && s:vtr_wait_result != 2
-        let s:vtr_wait_result = 3
+    if s:vtr_wait_result.result > 0 && sec >= s:vtr_wait_sec
+        let s:vtr_wait_result.result = 3
+    " Succ
+    elseif s:vtr_wait_result.result == 2 && s:vtr_wait_result.stop_mode == 1
+        return s:Strip(join(readfile(g:VtrCmdOutput), "\n"))
     endif
 
-    if a:line_min > 0 && s:vtr_wait_result == 2
-        return s:Strip(join(readfile("/tmp/vim.yank"), "\n"))
-    else
-        return ''
+    return ''
+endfunction
+
+function s:WaitCmdResultAsync(stop_mode, line_min, line_max, output_mode)
+    let _func = 'WaitCmdResultAsync() '
+
+    let chk = s:WaitCmdInit(_func, 1, a:stop_mode, a:line_min, a:line_max, a:output_mode)
+    if !chk | let s:vtr_wait_result.result = -1 | return | endif
+    let s:vtr_wait_result.result = 1
+
+    if a:stop_mode == 1
+        let s:vtr_wait_result.timer = timer_start(s:vtr_wait_period, 'VtrTimerHandlerLine', {'repeat': s:vtr_wait_count})
+    elseif a:stop_mode == 0
+        let s:vtr_wait_result.timer = timer_start(s:vtr_wait_period, 'VtrTimerHandlerPrompt', {'repeat': s:vtr_wait_count})
     endif
 endfunction
 
 function s:GuessOSPrompt()
     if len(s:osprompt) == 0
         call s:SendClearSequence()
-        call system("tmux clear-history -t '~'")
+        call s:ShellCmd(1, "tmux clear-history -t '~'")
         "1sleep
-        let s:osprompt = s:SystemCmdWait('', 1, 1, '')
-        if s:vtr_wait_result != 2
+        let s:osprompt = s:WaitCmdResult(1, 1, 1, 0)
+        if s:vtr_wait_result.result != 2
             let s:osprompt = ''
         endif
         silent! call s:log.info("osprompt=[", s:osprompt, "]")
-        let s:vtr_wait_result = 0
+        let s:vtr_wait_result.result = 0
         return 2
     endif
     return 1
 endfunction
 
 function s:BufferPasteHere()
-    let s:vtr_wait_result = 0
-    call system("tmux capture-pane -S- -t '~' -p | awk 'BEGIN{RS=\"\";ORS=\"\\n\\n\"}1' > /tmp/vim.yank")
-    exec "read /tmp/vim.yank"
+    let s:vtr_wait_result.result = -2
+    call s:WaitStopTimer()
+    call s:ShellCmd(1, "tmux capture-pane -S- -t '~' -p | awk 'BEGIN{RS=\"\";ORS=\"\\n\\n\"}1' > ". g:VtrCmdOutput)
+    exec "read ". g:VtrCmdOutput
 endfunction
 
 function! s:DefineCommands()
@@ -662,6 +786,7 @@ function! s:DefineCommands()
     command! VtrFlushCommand call s:FlushCommand()
     command! VtrSendCtrlD call s:SendCtrlD()
     command! VtrBufferPasteHere call s:BufferPasteHere()
+    command! VtrDebugPrompt call s:GuessOSPrompt()
     command! -bang -nargs=? -bar VtrAttachToPane call s:AttachToPane(<f-args>)
 endfunction
 
