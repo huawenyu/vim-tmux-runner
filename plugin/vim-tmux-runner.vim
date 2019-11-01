@@ -1,15 +1,40 @@
-function! s:InitVariable(var, value)
-    if !exists(a:var)
-        let escaped_value = substitute(a:value, "'", "''", "g")
-        exec 'let ' . a:var . ' = ' . "'" . escaped_value . "'"
-        return 1
-    endif
-    return 0
-endfunction
-
+" SafeGuard {{{1
+if exists('g:loaded_tmux_runner')
+  finish
+endif
+let g:loaded_tmux_runner = 1
 silent! let s:log = logger#getLogger(expand('<sfile>:t'))
-let s:osprompt = ''
 
+" Config {{{1
+if !exists("g:VtrUseVtrMaps")      | let g:VtrUseVtrMaps = 0               | endif
+if !exists("g:VtrPercentage")      | let g:VtrPercentage = 20              | endif
+if !exists("g:VtrOrientation")     | let g:VtrOrientation = 'v'            | endif
+if !exists("g:VtrInitialCommand")  | let g:VtrInitialCommand = ''          | endif
+if !exists("g:VtrGitCdUpOnOpen")   | let g:VtrGitCdUpOnOpen = 0            | endif
+if !exists("g:VtrClearBeforeSend") | let g:VtrClearBeforeSend = 1          | endif
+if !exists("g:VtrPrompt")          | let g:VtrPrompt = 'Command to run: '  | endif
+if !exists("g:VtrClearOnReorient") | let g:VtrClearOnReorient = 1          | endif
+if !exists("g:VtrClearOnReattach") | let g:VtrClearOnReattach = 1          | endif
+if !exists("g:VtrDetachedName")    | let g:VtrDetachedName = 'VTR_Pane'    | endif
+if !exists("g:VtrClearSequence")   | let g:VtrClearSequence = ""       | endif
+if !exists("g:VtrDisplayPaneNum")  | let g:VtrDisplayPaneNum = 1           | endif
+if !exists("g:VtrStripLeadSpace")  | let g:VtrStripLeadSpace = 1           | endif
+if !exists("g:VtrClearEmptyLines") | let g:VtrClearEmptyLines = 1          | endif
+if !exists("g:VtrAppendNewline")   | let g:VtrAppendNewline = 0            | endif
+if !exists("g:VtrWaitPrompt")      | let g:VtrWaitPrompt = [1,2,4,8,12,16] | endif
+if !exists("g:VtrUseMarkStart")    | let g:VtrUseMarkStart = 'u'           | endif
+if !exists("g:VtrUseMarkEnd")      | let g:VtrUseMarkEnd = 'n'             | endif
+
+" VarInit {{{1
+let s:osprompt = ''
+let s:runner_marker = 0
+let s:runner_window = -1
+let s:vtr_percentage = g:VtrPercentage
+let s:vtr_orientation = g:VtrOrientation
+let s:vtr_wait_result = 0  | " 0 not-waiting, 1 waiting, 2 wait-succ, 3 wait-timeout
+let s:vtr_wait_timer = 0
+
+" Functions {{{1
 function! s:DictFetch(dict, key, default)
     if has_key(a:dict, a:key)
         return a:dict[a:key]
@@ -49,6 +74,7 @@ endfunction
 function! s:ValidRunnerPaneSet()
     let marked_pane = s:SendTmuxCommand("display-message -p -t '~'")
     if marked_pane !=# 'no marked target'
+        let s:runner_marker = 1
         let s:runner_window = s:MarkedWindowIndex()
         let s:runner_pane = s:MarkedPaneIndex()
         return 1
@@ -194,7 +220,11 @@ function! s:SendTmuxCommand(command)
 endfunction
 
 function! s:TargetedTmuxCommand(command, target_pane)
-    return a:command . " -t " . a:target_pane
+    if s:runner_marker
+        return a:command . " -t " . s:runner_window . ".". a:target_pane
+    else
+        return a:command . " -t ". a:target_pane
+    endif
 endfunction
 
 function! s:_SendKeys(keys)
@@ -297,7 +327,7 @@ function! s:AttachToPane(...)
 endfunction
 
 function! s:PromptForPaneToAttach()
-  if g:VtrDisplayPaneNumbers
+  if g:VtrDisplayPaneNum
     call s:SendTmuxCommand('source ~/.tmux.conf && tmux display-panes')
   endif
   echohl String | let desired_pane = input('Pane #: ') | echohl None
@@ -384,7 +414,7 @@ endfunction
 function! s:SendTmuxCopyModeExit()
     let l:session = s:TmuxInfo('session_name')
     let l:win = s:TmuxInfo('window_index')
-    let target_cmd = join([l:session.':'.l:win.".".s:runner_pane])
+    let l:target_cmd = join([l:session.':'.l:win.".".s:runner_pane])
     if s:SendTmuxCommand("display-message -p -F '#{pane_in_mode}' -t " . l:target_cmd)
         call s:SendQuitSequence()
     endif
@@ -443,7 +473,7 @@ endfunction
 
 function! s:PrepareLines(lines)
     let prepared = a:lines
-    if g:VtrStripLeadingWhitespace
+    if g:VtrStripLeadSpace
         let prepared = map(a:lines, 'substitute(v:val,"^\\s*","","")')
     endif
     if g:VtrClearEmptyLines
@@ -511,12 +541,14 @@ endfunction
 function! VtrSendCommandEx(mode)
     if a:mode ==# 'n'
         " Try check mark first: xX as start-end region
-        let mark_1 = line("'u")
-        let mark_2 = line("'n")
         let cur_line = line('.')
+        let mark_1 = line("'". g:VtrUseMarkStart)
+        let mark_2 = line("'". g:VtrUseMarkEnd)
         if mark_1 > 0 && mark_2 > 0
+            silent! call s:log.info("Mark-mode start=", mark_1, " end=", mark_2)
             call s:SendTextToRunner(getline(mark_1, mark_2))
         else
+            silent! call s:log.info("CurrentLine-mode=", getline(cur_line, cur_line))
             call s:SendTextToRunner(getline(cur_line, cur_line))
         endif
         return
@@ -535,11 +567,19 @@ function! VtrExecuteCommand(mode)
     if s:GuessOSPrompt() < 2
         call s:SendClearSequence()
     endif
+
+    call s:SendClearSequence()
+    call system("tmux clear-history -t '~'")
+
     call VtrSendCommandEx(a:mode)
 
     call s:SystemCmdWait('', 0, 0, s:osprompt)
     "call s:SendTmuxCommand("save-buffer -b REPL /tmp/vim.yank")
-    exec "read /tmp/vim.yank"
+
+    if s:vtr_wait_result >= 2
+        exec "read /tmp/vim.yank"
+    endif
+    let s:vtr_wait_result = 0
 endfunction
 
 function s:SystemCmdWait(command, line_min, line_max, prompt)
@@ -547,44 +587,65 @@ function s:SystemCmdWait(command, line_min, line_max, prompt)
         call system(a:command)
     endif
 
+    let s:vtr_wait_result = 1
     if a:line_min > 0
-        for i in [1,2,4,8,16]
+        for i in g:VtrWaitPrompt
             exec 'sleep '. i . '00m'
-            let out_cmd = "tmux capture-pane -t '~' -p | sed '/^$/d' | tee /tmp/vim.yank | wc -l"
+            if !s:vtr_wait_result | break | endif
+            let out_cmd = "tmux capture-pane -S- -t '~' -p | sed '/^$/d' | tee /tmp/vim.yank | wc -l"
             let out_cnt = str2nr(s:Strip(system(out_cmd)))
             silent! call s:log.info("out_lines=", out_cnt, " cmd=", out_cmd)
             if out_cnt >= a:line_min && out_cnt <= a:line_max
+                let s:vtr_wait_result = 2
                 break
             endif
         endfor
     elseif len(a:prompt) > 0
-        for i in [1,2,4,8,16]
+        for i in g:VtrWaitPrompt
             exec 'sleep '. i . '00m'
-            let strcmd = "tmux capture-pane -t '~' -p | awk 'BEGIN{RS=\"\";ORS=\"\\n\\n\"}1' | tee /tmp/vim.yank | sed -n '2,$s/". a:prompt ."/&/p' | wc -l"
+            if !s:vtr_wait_result | break | endif
+            let strcmd = "tmux capture-pane -S- -t '~' -p | awk 'BEGIN{RS=\"\";ORS=\"\\n\\n\"}1' | tee /tmp/vim.yank | sed -n '2,$s/". a:prompt ."/&/p' | wc -l"
             let has_prompt = str2nr(s:Strip(system(strcmd)))
             silent! call s:log.info("prompt=", has_prompt, " cmd=", strcmd)
             if has_prompt > 0
+                let s:vtr_wait_result = 2
                 break
             endif
         endfor
     endif
 
-    if a:line_min > 0
-        return s:Strip(join(readfile("/tmp/vim.yank"), "\n"))
+    " Timeout
+    if s:vtr_wait_result && s:vtr_wait_result != 2
+        let s:vtr_wait_result = 3
     endif
-    return ''
+
+    if a:line_min > 0 && s:vtr_wait_result == 2
+        return s:Strip(join(readfile("/tmp/vim.yank"), "\n"))
+    else
+        return ''
+    endif
 endfunction
 
 function s:GuessOSPrompt()
     if len(s:osprompt) == 0
         call s:SendClearSequence()
-        call s:SendClearSequence()
-        1sleep
+        call system("tmux clear-history -t '~'")
+        "1sleep
         let s:osprompt = s:SystemCmdWait('', 1, 1, '')
+        if s:vtr_wait_result != 2
+            let s:osprompt = ''
+        endif
         silent! call s:log.info("osprompt=[", s:osprompt, "]")
+        let s:vtr_wait_result = 0
         return 2
     endif
     return 1
+endfunction
+
+function s:BufferPasteHere()
+    let s:vtr_wait_result = 0
+    call system("tmux capture-pane -S- -t '~' -p | awk 'BEGIN{RS=\"\";ORS=\"\\n\\n\"}1' > /tmp/vim.yank")
+    exec "read /tmp/vim.yank"
 endfunction
 
 function! s:DefineCommands()
@@ -600,6 +661,7 @@ function! s:DefineCommands()
     command! VtrClearRunner call s:SendClearSequence()
     command! VtrFlushCommand call s:FlushCommand()
     command! VtrSendCtrlD call s:SendCtrlD()
+    command! VtrBufferPasteHere call s:BufferPasteHere()
     command! -bang -nargs=? -bar VtrAttachToPane call s:AttachToPane(<f-args>)
 endfunction
 
@@ -620,27 +682,8 @@ function! s:DefineKeymaps()
     endif
 endfunction
 
-function! s:InitializeVariables()
-    call s:InitVariable("g:VtrPercentage", 20)
-    call s:InitVariable("g:VtrOrientation", "v")
-    call s:InitVariable("g:VtrInitialCommand", "")
-    call s:InitVariable("g:VtrGitCdUpOnOpen", 0)
-    call s:InitVariable("g:VtrClearBeforeSend", 1)
-    call s:InitVariable("g:VtrPrompt", "Command to run: ")
-    call s:InitVariable("g:VtrUseVtrMaps", 0)
-    call s:InitVariable("g:VtrClearOnReorient", 1)
-    call s:InitVariable("g:VtrClearOnReattach", 1)
-    call s:InitVariable("g:VtrDetachedName", "VTR_Pane")
-    call s:InitVariable("g:VtrClearSequence", "")
-    call s:InitVariable("g:VtrDisplayPaneNumbers", 1)
-    call s:InitVariable("g:VtrStripLeadingWhitespace", 1)
-    call s:InitVariable("g:VtrClearEmptyLines", 1)
-    call s:InitVariable("g:VtrAppendNewline", 0)
-    let s:vtr_percentage = g:VtrPercentage
-    let s:vtr_orientation = g:VtrOrientation
-endfunction
 
-call s:InitializeVariables()
+" Constructor {{{1
 call s:DefineCommands()
 call s:DefineKeymaps()
 
