@@ -1,10 +1,9 @@
-VTR [Vim Tmux Runner]
+# VTR [Vim Tmux Runner]
 =====================
 
 A simple, vimscript only, command runner for sending commands from vim to tmux.
 
-Usage
------
+## Usage
 
 VTR provides a handful of commands for managing and interacting with [tmux][],
 the terminal multiplexer. The main command is:
@@ -30,8 +29,18 @@ VTR, check [the included doc file][].
 
 You can watch a [short demo][] by [Jack Franklin][] recorded at [Vim London][].
 
-Installation
-------------
+## Contorl multiple Panes
+
+```sh
+    #@vim {'pane': '2'}
+    ls -lart
+    echo "hello world"
+
+    #@vim {'pane': '4'}
+    uname -a
+```
+
+## Installation
 
 If you don't have a preferred installation method, I recommend using
 [vim-plug][]:
@@ -45,8 +54,7 @@ this plugin.
 
 [vim-plug]: https://github.com/junegunn/vim-plug
 
-Python Notes
-------------
+## Python Notes
 
 If you are using python, or any other language with syntactic whitespace, you
 will likely want to change the following settings to better support the
@@ -67,8 +75,7 @@ be done with the following `ipython --no-autoindent`.
 
 [this Stack Overflow thread]: http://stackoverflow.com/a/1840304/2751777
 
-Inspiration
------------
+## Inspiration
 
 This plugin is heavily inspired by the functionality in the [Vimux][] plugin.
 This plugin aims to implement a similar feature set while not requiring Vim

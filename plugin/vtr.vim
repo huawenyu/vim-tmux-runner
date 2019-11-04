@@ -26,6 +26,8 @@ if !exists("g:VtrUseMarkStart")    | let g:VtrUseMarkStart = 'u'           | end
 if !exists("g:VtrUseMarkEnd")      | let g:VtrUseMarkEnd = 'n'             | endif
 if !exists("g:VtrCmdOutput")       | let g:VtrCmdOutput = '/tmp/vim.yank'  | endif
 if !exists("g:VtrVimPrefix")       | let g:VtrVimPrefix = '#@vim'          | endif
+if !exists("g:VtrFindWindowByName")| let g:VtrFindWindowByName = 0         | endif
+if !exists("g:VtrFindPaneByName")  | let g:VtrFindPaneByName = 0           | endif
 
 " Constructor {{{1
 call vtr#DefineCommands()

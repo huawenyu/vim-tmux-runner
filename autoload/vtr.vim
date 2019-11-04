@@ -4,21 +4,37 @@ if !exists("s:init")
 
     " Initialize
     let s:osprompt = ''
-    let s:runner_marker = 0
-    let s:runner_window = -1
     let s:vtr_percentage = g:VtrPercentage
     let s:vtr_orientation = g:VtrOrientation
     let s:vtr_wait_period = 300  | "milliseconds.
     let s:vtr_wait_sec = g:VtrWaitSec * 1000
     let s:vtr_wait_count = s:vtr_wait_sec / s:vtr_wait_period
 
-    " @result: 0 not-waiting,
-    "          1 waiting, 2 wait-succ, 3 wait-timeout
-    "         -1 request err
-    "         -2 interrupt by user: active paste from tmux-buffer
-    "
-    " @stop_mode:   0 wait prompt, 1 wait lines
-    " @output_mode: 0 ignore, 1 insert here
+    let s:eResult = {
+          \ 'ReqErr':    -1,
+          \ 'Interrupt': -2,
+          \ 'Idle':      0,
+          \ 'Pending':   1,
+          \ 'WaitSucc':  2,
+          \ 'Timeout':   3,
+          \ }
+    let s:eStopMode = {
+          \ 'ExpectPrompt':  0,
+          \ 'ExpectLineNum': 1,
+          \ }
+    let s:eOutMode = {
+          \ 'Ignore':     0,
+          \ 'InsertHere': 1,
+          \ }
+    let s:eRunnerPaneSrc = {
+          \ 'None':       0,
+          \ 'UserAttach': 1,
+          \ 'NoteAttach': 2,
+          \ 'UserMark':   3,
+          \ 'AutoAlt':    4,
+          \ }
+
+    let s:runner_source = s:eRunnerPaneSrc.None
     let s:vtr_wait_result = {'async': 0, 'stop_mode': 0, 'output_mode': 0, 'min': 0, 'max': 0, 'timer': 0, 'timer_cnt': 0, 'result': 0, }
 
     silent! call s:log.info("============================================")
@@ -61,7 +77,6 @@ function! s:CreateRunnerPane(...)
     let s:vim_pane = s:ActivePaneIndex()
     let cmd = join(["split-window -p", s:vtr_percentage, "-".s:vtr_orientation])
     call s:SendTmuxCommand(cmd)
-    let s:runner_window = s:ActiveWindowIndex()
     let s:runner_pane = s:ActivePaneIndex()
     call s:FocusVimPane()
     if g:VtrGitCdUpOnOpen
@@ -73,29 +88,44 @@ function! s:CreateRunnerPane(...)
 endfunction
 
 function! s:DetachRunnerPane()
-    if !s:ValidRunnerPaneSet() | return | endif
+    if !s:ResolveRunnerPane() | return | endif
     call s:BreakRunnerPaneToTempWindow()
     let cmd = join(["rename-window -t", s:detached_window, g:VtrDetachedName])
     call s:SendTmuxCommand(cmd)
 endfunction
 
-function! s:ValidRunnerPaneSet()
-    let marked_pane = s:SendTmuxCommand("display-message -p -t '~'")
-    if marked_pane !=# 'no marked target'
-        let s:runner_marker = 1
-        let s:runner_window = s:MarkedWindowIndex()
-        let s:runner_pane = s:MarkedPaneIndex()
-        return 1
+function! s:ResolveRunnerPane()
+    let _func = "vtr#ResolveRunnerPane() "
+    if s:runner_source == s:eRunnerPaneSrc.UserAttach
+          \ || s:runner_source == s:eRunnerPaneSrc.NoteAttach
+        " <Nop>
+    else
+        let s:runner_source = s:eRunnerPaneSrc.None
+
+        let s:runner_pane = vtr#panes#GetMarkPane()
+        if !empty(s:runner_pane)
+            let s:runner_source = s:eRunnerPaneSrc.UserMark
+        else
+            let s:runner_pane = vtr#panes#GetAltPane('', '', '')
+            if !empty(s:runner_pane)
+                let s:runner_source = s:eRunnerPaneSrc.AutoAlt
+            endif
+        endif
     endif
 
-    if !exists("s:runner_pane")
+    if !exists("s:runner_pane") || empty(s:runner_pane)
         call s:EchoError("No runner pane attached.")
+        silent! call s:log.error(_func, "No runner pane attached.")
         return 0
     endif
-    if !s:ValidRunnerPaneNumber(s:runner_pane)
-        call s:EchoError("Runner pane setting (" . s:runner_pane . ") is invalid. Please reattach.")
-        return 0
-    endif
+
+    " Current runner_pane = 'sess:workID.paneID'
+    "if !s:ValidRunnerPaneNumber(s:runner_pane)
+    "    call s:EchoError("Runner pane setting (" . s:runner_pane . ") is invalid. Please reattach.")
+    "    return 0
+    "endif
+
+    silent! call s:log.debug(_func, "src=", s:runner_source, " runner=", s:runner_pane)
     return 1
 endfunction
 
@@ -133,7 +163,7 @@ function! s:RequireLocalPaneOrDetached()
 endfunction
 
 function! s:KillLocalRunner()
-    if s:ValidRunnerPaneSet()
+    if s:ResolveRunnerPane()
       let targeted_cmd = s:TargetedTmuxCommand("kill-pane", s:runner_pane)
       call s:SendTmuxCommand(targeted_cmd)
       unlet s:runner_pane
@@ -174,14 +204,6 @@ function! s:ActivePaneIndex()
     return str2nr(s:SendTmuxCommand("display-message -p '#{pane_index}'"))
 endfunction
 
-function! s:MarkedWindowIndex()
-    return str2nr(s:SendTmuxCommand("display-message -t '~' -p '#{window_index}'"))
-endfunction
-
-function! s:MarkedPaneIndex()
-    return str2nr(s:SendTmuxCommand("display-message -t '~' -p '#{pane_index}'"))
-endfunction
-
 function! s:TmuxPanes()
     let panes = s:SendTmuxCommand("list-panes")
     return split(panes, '\n')
@@ -204,7 +226,7 @@ function! s:RunnerPaneDimensions()
 endfunction
 
 function! s:FocusRunnerPane(should_zoom)
-    if !s:ValidRunnerPaneSet() | return | endif
+    if !s:ResolveRunnerPane() | return | endif
     call s:FocusTmuxPane(s:runner_pane)
     if a:should_zoom
         call s:SendTmuxCommand("resize-pane -Z")
@@ -224,11 +246,8 @@ function! s:SendTmuxCommand(command)
 endfunction
 
 function! s:TargetedTmuxCommand(command, target_pane)
-    if s:runner_marker
-        return a:command . " -t " . s:runner_window . ".". a:target_pane
-    else
-        return a:command . " -t ". a:target_pane
-    endif
+    " @todo wilson should always use -t 'session-name:window-index.pane-index'
+    return a:command . " -t '". a:target_pane. "'"
 endfunction
 
 function! s:_SendKeys(keys)
@@ -248,13 +267,13 @@ function! s:SendEnterSequence()
 endfunction
 
 function! s:SendClearSequence()
-    if !s:ValidRunnerPaneSet() | return | endif
+    if !s:ResolveRunnerPane() | return | endif
     call s:SendTmuxCopyModeExit()
     call s:_SendKeys(g:VtrClearSequence)
 endfunction
 
 function! s:SendQuitSequence()
-    if !s:ValidRunnerPaneSet() | return | endif
+    if !s:ResolveRunnerPane() | return | endif
     call s:_SendKeys("q")
 endfunction
 
@@ -394,7 +413,7 @@ function! s:_ReattachPane()
 endfunction
 
 function! s:ReorientRunner()
-    if !s:ValidRunnerPaneSet() | return | endif
+    if !s:ResolveRunnerPane() | return | endif
     call s:BreakRunnerPaneToTempWindow()
     call s:ToggleOrientationVariable()
     call s:_ReattachPane()
@@ -426,7 +445,7 @@ endfunction
 
 function! s:SendCommandToRunner(ensure_pane, ...)
     if a:ensure_pane | call s:EnsureRunnerPane() | endif
-    if !s:ValidRunnerPaneSet() | return | endif
+    if !s:ResolveRunnerPane() | return | endif
     if exists("a:1") && a:1 != ""
         let s:user_command = shellescape(a:1)
     endif
@@ -462,7 +481,7 @@ endfunction
 
 function! s:SendLinesToRunner(ensure_pane) range
     if a:ensure_pane | call s:EnsureRunnerPane() | endif
-    if !s:ValidRunnerPaneSet() | return | endif
+    if !s:ResolveRunnerPane() | return | endif
     call s:SendTmuxCopyModeExit()
 
     " Try check mark first: xX as start-end region
@@ -483,13 +502,18 @@ function! s:IsVimPrefix(line)
 endfunction
 
 function! s:HandleVimPrefix(vimPrefix)
+    let _func = "vtr#HandleVimPrefix() "
+
     "#@vim {'session': 'session-name', 'window': 'window-name', 'pane': 'pane-title', }
     try
-        try | exec 'let targetPane='. line  | catch | echo v:exception | endtry
-        let s:runner_pane = vtr#panes#GetTarget(targetPane)
+        silent! call s:log.debug(_func, a:vimPrefix)
+        exec 'let targetPane='. a:vimPrefix
+
+        let s:runner_pane = vtr#panes#GetUserDict(targetPane)
         silent! call s:log.info("pane from vimPrefix: ", s:runner_pane)
     catch /.*/
-        echo "outer catch:" v:exception
+        "echo "outer catch:" v:exception
+        silent! call s:log.error(_func, a:vimPrefix, " Exeception", v:exception)
     endtry
 endfunction
 
@@ -531,12 +555,12 @@ function! s:PrepareLines(lines)
         let list_of_lines = filter(list_of_lines, "len(v:val)")
     endif
 
-    silent! call s:log.info("list lines: ", list_of_lines)
+    silent! call s:log.debug("list lines: ", list_of_lines)
     return list_of_lines
 endfunction
 
 function! s:SendWholeToRunner(lines)
-    if len(lines) == 0 | return | endif
+    if len(a:lines) == 0 | return | endif
 
     " Adjust vim command
     let vimPrefix = a:lines[0]
@@ -558,7 +582,7 @@ function! s:SendWholeToRunner(lines)
 endfunction
 
 function! s:SendTextToRunner(lines)
-    if !s:ValidRunnerPaneSet() | return | endif
+    if !s:ResolveRunnerPane() | return | endif
     let list_of_lines = s:PrepareLines(a:lines)
     for lines in list_of_lines
         call s:SendWholeToRunner(lines)
@@ -566,7 +590,7 @@ function! s:SendTextToRunner(lines)
 endfunction
 
 function! s:SendCtrlD()
-  if !s:ValidRunnerPaneSet() | return | endif
+  if !s:ResolveRunnerPane() | return | endif
   call s:SendTmuxCopyModeExit()
   call s:SendKeys('')
 endfunction
@@ -658,8 +682,8 @@ function s:TimerProcessResult(timer, result)
 
     " take-action
     if s:vtr_wait_result.async
-        let s:vtr_wait_result.result = 0
-        if s:vtr_wait_result.output_mode
+        let s:vtr_wait_result.result = s:eResult.Idle
+        if s:vtr_wait_result.output_mode == s:eOutMode.InsertHere
             exec "read ". g:VtrCmdOutput
         endif
     else
@@ -668,7 +692,7 @@ function s:TimerProcessResult(timer, result)
 endfunc
 
 function! vtr#TimerHandlerLine(timer)
-    if s:vtr_wait_result.result <= 0
+    if s:vtr_wait_result.result <= s:eResult.Idle
         if a:timer | call timer_stop(a:timer) | endif
         return
     endif
@@ -679,7 +703,7 @@ function! vtr#TimerHandlerLine(timer)
     if s:vtr_wait_result.timer_cnt >= s:vtr_wait_count
         call s:CaptureOutput(get_output)
         call s:TimerProcessResult(a:timer, 3)
-    elseif s:vtr_wait_result.result > 0
+    elseif s:vtr_wait_result.result > s:eResult.Idle
         let out_cnt = s:CaptureOutput(get_output)
         "call s:DumpWaitResult("handle line")
         "silent! call s:log.info("out_cnt=", out_cnt)
@@ -690,7 +714,7 @@ function! vtr#TimerHandlerLine(timer)
 endfunc
 
 function! vtr#TimerHandlerPrompt(timer)
-    if s:vtr_wait_result.result <= 0
+    if s:vtr_wait_result.result <= s:eResult.Idle
         if a:timer | call timer_stop(a:timer) | endif
         return
     endif
@@ -701,7 +725,7 @@ function! vtr#TimerHandlerPrompt(timer)
     if s:vtr_wait_result.timer_cnt >= s:vtr_wait_count
         call s:CaptureOutput(get_output)
         call s:TimerProcessResult(a:timer, 3)
-    elseif s:vtr_wait_result.result > 0
+    elseif s:vtr_wait_result.result > s:eResult.Idle
         let has_prompt = s:CaptureOutput(get_output)
         if has_prompt > 0
             call s:TimerProcessResult(a:timer, 2)
@@ -720,14 +744,14 @@ function s:WaitCmdInit(_func, async, stop_mode, line_min, line_max, output_mode)
     let s:vtr_wait_result.async = a:async
     let s:vtr_wait_result.stop_mode = a:stop_mode
     let s:vtr_wait_result.output_mode = a:output_mode
-    if a:stop_mode == 0   | " @stop_mode:   0 wait prompt, 1 wait lines
+    if a:stop_mode == s:eStopMode.ExpectPrompt
         if len(s:osprompt) <= 1
             let info = ''. a:_func. "prompt stop_mode but no osprompt, wait timer guess os-prompt!"
             silent! call s:log.info(_func, )
             echomsg "vim-tmux-runner: ". info
             return 0
         endif
-    elseif a:stop_mode == 1
+    elseif a:stop_mode == s:eStopMode.ExpectLineNum
         if a:line_min <= 0 && a:line_max <= 0
             let info = ''. a:_func. "line stop_mode but no (min,max) assign!"
             silent! call s:log.info(_func, info)
@@ -758,30 +782,28 @@ function s:WaitCmdResult(stop_mode, line_min, line_max, output_mode)
     let _func = 'WaitCmdResult() '
 
     let chk = s:WaitCmdInit(_func, 0, a:stop_mode, a:line_min, a:line_max, a:output_mode)
-    if !chk | let s:vtr_wait_result.result = -1 | return | endif
-    let s:vtr_wait_result.result = 1
+    if !chk | let s:vtr_wait_result.result = s:eResult.ReqErr | return | endif
+    let s:vtr_wait_result.result = s:eResult.Pending
 
     let sec = 0
     while sec < s:vtr_wait_sec
         let sec += s:vtr_wait_period
         exec 'sleep '. s:vtr_wait_period. 'm'
 
-        if s:vtr_wait_result.stop_mode == 1
+        if s:vtr_wait_result.stop_mode == s:eStopMode.ExpectLineNum
             call vtr#TimerHandlerLine(0)
-        elseif s:vtr_wait_result.stop_mode == 0
+        elseif s:vtr_wait_result.stop_mode == s:eStopMode.ExpectPrompt
             call vtr#TimerHandlerPrompt(0)
         endif
 
-        if s:vtr_wait_result.result < 1 || s:vtr_wait_result.result == 2
+        if s:vtr_wait_result.result < s:eResult.Pending || s:vtr_wait_result.result == s:eResult.WaitSucc
             break
         endif
     endwhile
 
-    " Timeout
-    if s:vtr_wait_result.result > 0 && sec >= s:vtr_wait_sec
-        let s:vtr_wait_result.result = 3
-    " Succ
-    elseif s:vtr_wait_result.result == 2 && s:vtr_wait_result.stop_mode == 1
+    if s:vtr_wait_result.result > s:eResult.Idle && sec >= s:vtr_wait_sec
+        let s:vtr_wait_result.result = s:eResult.Timeout
+    elseif s:vtr_wait_result.result == s:eResult.WaitSucc && s:vtr_wait_result.stop_mode == s:eStopMode.ExpectLineNum
         return vtr#Strip(join(readfile(g:VtrCmdOutput), "\n"))
     endif
 
@@ -794,11 +816,11 @@ function s:GuessOSPrompt()
         call vtr#ShellCmdLog("tmux clear-history -t '~'")
         "1sleep
         let s:osprompt = s:WaitCmdResult(1, 1, 1, 0)
-        if s:vtr_wait_result.result != 2
+        if s:vtr_wait_result.result != s:eResult.WaitSucc
             let s:osprompt = ''
         endif
         silent! call s:log.info("osprompt=[", s:osprompt, "]")
-        let s:vtr_wait_result.result = 0
+        let s:vtr_wait_result.result = s:eResult.Idle
         return 2
     endif
     return 1
@@ -808,18 +830,18 @@ function s:WaitCmdResultAsync(stop_mode, line_min, line_max, output_mode)
     let _func = 'WaitCmdResultAsync() '
 
     let chk = s:WaitCmdInit(_func, 1, a:stop_mode, a:line_min, a:line_max, a:output_mode)
-    if !chk | let s:vtr_wait_result.result = -1 | return | endif
-    let s:vtr_wait_result.result = 1
+    if !chk | let s:vtr_wait_result.result = s:eResult.ReqErr | return | endif
+    let s:vtr_wait_result.result = s:eResult.Pending
 
-    if a:stop_mode == 1
+    if a:stop_mode == s:eStopMode.ExpectLineNum
         let s:vtr_wait_result.timer = timer_start(s:vtr_wait_period, 'vtr#TimerHandlerLine', {'repeat': s:vtr_wait_count})
-    elseif a:stop_mode == 0
+    elseif a:stop_mode == s:eStopMode.ExpectPrompt
         let s:vtr_wait_result.timer = timer_start(s:vtr_wait_period, 'vtr#TimerHandlerPrompt', {'repeat': s:vtr_wait_count})
     endif
 endfunction
 
 function s:BufferPasteHere()
-    let s:vtr_wait_result.result = -2
+    let s:vtr_wait_result.result = s:eResult.Interrupt
     call s:WaitStopTimer()
     call vtr#ShellCmdLog("tmux capture-pane -S- -t '~' -p | awk 'BEGIN{RS=\"\";ORS=\"\\n\\n\"}1' > ". g:VtrCmdOutput)
     exec "read ". g:VtrCmdOutput
